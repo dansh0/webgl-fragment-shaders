@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8" />
+    <title>Shader Examples</title>
+    <style>
+        html {
+            height: 100%;
+        }
+        body {
+            height: 100%;
+            margin: 0;
+        }
+        .container {
+            position: absolute;
+            left: 10px;
+            top: 10px;        
+            width: 75px;
+            background-color: #aeadad;
+            border-radius: 10px;
+            padding: 10px;
+            box-shadow: 0px 0px 10px rgba(0, 0, 0, 0.1);
+        }
+        .btn {
+            width: 100%;
+            padding: 5px;
+            margin-bottom: 5px;
+            border: none;
+            border-radius: 5px;
+            background-color: #494949;
+            color: #fff;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+        .btn:last-child {
+            margin-bottom: 0;
+        }
+        .btn:hover {
+            background-color: #7d7d7d;
+        }
+        .circle-btn {
+            width: 60px; /* Adjust size as needed */
+            height: 60px; /* Adjust size as needed */
+            border-radius: 50%;
+            background-color: #494949; /* Button color */
+            color: #fff; /* Text color */
+            font-size: 24px; /* Adjust font size as needed */
+            line-height: 60px; /* Adjust line-height to match the button height */
+            border: none;
+            cursor: pointer;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            outline: none; /* Remove focus outline */
+            transition: background-color 0.3s ease;
+        }
+
+        .circle-btn:hover {
+            background-color: #7d7d7d; /* Button color on hover */
+        }
+    </style>
+</head>
+<body>
+    <canvas id="webglCanvas"></canvas> 
+    <div class="container">
+        <button class="btn" onclick="changeShader('ribbons')">Ribbons</button>
+        <button class="btn" onclick="changeShader('orb')">Orb</button>
+        <button class="circle-btn">&#60;&#47;&#62;</button>
+
+        <!-- <button class="btn" onclick="changeShader('flakes')">Flakes</button> -->
+    </div>
+    <script id="vertexShader" type="x-shader/x-vertex">
+        attribute vec4 aPosition;
+        varying vec2 vUv;
+        void main() {
+            vUv = aPosition.xy/2.0 + 0.5;
+            gl_Position = aPosition;
+        }
+    </script>
+    <script id="fragmentShaderRibbons" type="x-shader/x-fragment">
+        #define MAX_STEPS_BOUNDS 10000
+        #define MAX_STEPS_FILL 8
+        #define SUBSTEPS 1
+        #define MAX_DIST 400.
+        #define MIN_DIST 0.01
+        #define DOTS_PER_MM 10.
+        #define NORM_EPS 0.001
+        #define PI 3.141592
+
+        precision mediump float;
+        uniform float uTime;
+        uniform vec2 uResolution;
+
+        // PARAMS
+        float tpmsDiv = 5.0; // # of periods within the volume
+        float cDist = 200.; // Camera distance from center
+        vec3 objCol = vec3(1.0, 1.0, 1.0); // Base material color
+        vec3 lCol = vec3(1.0, 1.0, 1.0); // Light color
+        vec3 lPos = vec3(0.); // Light source position
+        float alStr = 0.2; // Ambient light strength
+        float dlStr = 0.8; // Diffuse light strength
+
+        // Globals
+        float scl; // Part Size
+        float tpmsSc; // Fill Periodicity
+        float tpmsFac; // Fill Density (width only in this case)
+
+        // GEOMETRY
+            
+        // Sphere SDF
+        float dSphere(vec3 p, vec3 c, float r) {
+            vec3 transPoint = (p - c);
+            return length(transPoint) - r;
+        }
+
+        // Schwarz SDF
+        float dSchwarz(vec3 p) {
+            p *= tpmsSc;
+            float fac = 0.10 + 0.075*sin(2.0*PI*(mod(uTime,10.0)/10.0 + 4.0*length(p)/scl));
+            return abs(dot(cos(p), vec3(1.0))) - fac;
+        }
+            
+
+        // GEOMETRY COMBINATIONS
+
+        // Distance Function Combine
+        float dComb( vec3 p ) {
+            
+            // geometry
+            float sph = dSphere( p, vec3(0.), scl);
+            float tpms = dSchwarz(p);
+            
+            return max(tpms, sph);
+            
+        }     
+
+            
+        // RAY TOOLS
+            
+        // Ray March for boundary
+        float mrch(vec3 p, vec3 d) {
+            float dist = 0.;
+            for (int iStep=0; iStep<MAX_STEPS_BOUNDS; iStep++) {
+                float mDist = dSphere( p, vec3(0.), scl);
+                if (mDist > MIN_DIST && dist < MAX_DIST) {
+                    p += mDist * d;
+                    dist += mDist;
+                } else {
+                    return dist;
+                }
+            }
+            return MAX_DIST;
+        }
+
+        // Volumetric raymarch for fill
+        float mrchFixSt(vec3 p, vec3 d, float bDist, float step, out int iter) {
+                    
+            // start at start of bounding sphere
+            vec3 bPos = p + bDist * d;
+            float dist = bDist; 
+            p = bPos;
+
+            for (int iStep=0; iStep<MAX_STEPS_FILL; iStep++) {
+                float sdfDist = dComb(p);
+                if (sdfDist>MIN_DIST && dist<MAX_DIST) {
+                    p += step * d;
+                    dist += step;
+                } else {
+                    iter = iStep;
+                    return dist;
+                }
+            }
+            return MAX_DIST;
+        }
+            
+        // tpmsGradient instead of normal (maybe the same??)
+        vec3 tpmsGrad(vec3 p) {
+            vec3 change;
+            change.x = dSchwarz(p + vec3(NORM_EPS, 0, 0)) - dSchwarz(p - vec3(NORM_EPS, 0, 0));
+            change.y = dSchwarz(p + vec3(0, NORM_EPS, 0)) - dSchwarz(p - vec3(0, NORM_EPS, 0)); 
+            change.z = dSchwarz(p + vec3(0, 0, NORM_EPS)) - dSchwarz(p - vec3(0, 0, NORM_EPS)); 
+            return normalize( change );
+        }
+
+
+        // CAMERA TOOLS
+
+        // Orbit Controls
+        vec3 orbitCtrl(float cDist, vec2 sphAngles) {
+            // spherical angles is x = theta -PI to PI and y = phi -PI/2 to PI/2
+            vec3 cPos;
+            cPos.x = cDist * cos(sphAngles.x) * sin(sphAngles.y);
+            cPos.z = cDist * sin(sphAngles.x) * sin(sphAngles.y);
+            cPos.y = cDist * cos(sphAngles.y);
+            return cPos;  
+        }    
+
+
+        // Camera Fragment Position (Orthographic)
+        vec3 orthoFragP(vec3 cPos, vec3 cDir, vec2 cSize) {
+            vec3 up = vec3(0.0, 1.0, 0.0);
+            if (cDir.x == 0.0 && cDir.z == 0.0 && cDir.y != 0.0) {
+                up = vec3(0.0, 0.0, 1.0);
+            }
+            vec2 off = ((gl_FragCoord.xy / uResolution.xy) * cSize) - (cSize * 0.5);
+            vec3 rCh = normalize(cross(cDir, up));
+            vec3 upCh = normalize(cross(rCh, cDir));
+            vec3 wrldOff = off.x * rCh + off.y * upCh;
+            return cPos + wrldOff;
+        }
+
+            
+        // MAIN
+        void main()
+        {
+            // Background color default
+            vec3 col = vec3(0.0);
+            
+            // Set Geometry Size
+            float hMargRg = (uResolution.y + 30.) / 2.0;
+            float marg = -uResolution.y + hMargRg * (1.0-cos(uTime/50.0));//-uResolution.y; 
+            float sphRPx = min(uResolution.y, uResolution.x)/2.0 - marg;
+            scl = sphRPx / DOTS_PER_MM;
+            tpmsSc = (2.0*PI)/((2.0*scl)/tpmsDiv);
+            
+            // Init camera
+            vec2 cSize = uResolution.xy / DOTS_PER_MM;
+            vec2 cAngles = vec2(sin(uTime/20.0)*PI, (PI/2.0)+(sin(uTime/25.0-PI/2.0))*0.999*(PI/2.0));
+            //fragColor = vec4(vec3(-1.0*cAngles.y/(2.0*PI), cAngles.y/(2.0*PI), 0.0), 1.0);
+            vec3 cPos = orbitCtrl(cDist, cAngles);
+            vec3 cDir = normalize(-cPos);
+            vec3 fragPos = orthoFragP(cPos, cDir, cSize);
+            
+            // Ray March Step Boundary
+            float objDist = mrch(fragPos.xyz, cDir);
+            vec3 objPos = fragPos + cDir * objDist;
+            
+            // Ray March Fixed Step Lattice
+            float step = 2.0*scl / float(MAX_STEPS_FILL);
+            int iter;
+            float tpmsDist = mrchFixSt(fragPos.xyz, cDir, objDist, step, iter);
+            vec3 tpmsPos = fragPos + cDir * tpmsDist;
+            
+            
+            if (tpmsDist < MAX_DIST) {
+                // Find gradient
+                vec3 grad = tpmsGrad(tpmsPos);
+                objCol = 1.0 - abs(grad)/2.0;
+                
+                // Color Based on Iteration
+                float colMod = 3.0;
+                float iterVal = floor(abs(mod(float(iter),8.0)-3.9));
+                vec3 colMult = vec3(float(iterVal>2.0), float(iterVal<2.0), float(iterVal>0.0));
+                objCol *= colMult*colMod;
+                
+                // Ambient Lighting
+                vec3 ambiLight = lCol * alStr;
+                
+                // Diffuse Lighting
+                vec3 diffDir = normalize(lPos - tpmsPos);
+                vec3 diffLight = lCol * dlStr * max(dot(grad, diffDir), 0.0);
+                
+                // Combined Lighting
+                vec3 combLight = ambiLight + diffLight;
+                col = combLight * objCol;
+
+            } else {
+                // Background
+                    col = vec3(abs(dSchwarz(vec3(gl_FragCoord.xy*(5.0),uTime/2.0)/tpmsSc))*0.1);
+            
+            }
+
+            // Output to screen
+            gl_FragColor = vec4(col,1.0);
+            
+        }
+    </script>
+    <script id="fragmentShaderOrb" type="x-shader/x-fragment">
+        #define PI 3.14159
+
+        precision mediump float;
+        uniform float uTime;
+        uniform vec2 uResolution;
+
+        float gyroid(vec3 point) {
+            return cos(point.x) * sin(point.y) + cos(point.y) * sin(point.z) + cos(point.z) * sin(point.x);
+        }
+
+        float sphereDepth(vec2 position) {
+            return sqrt(1.0 - length(position)); 
+        }
+
+        void main()
+        {
+
+            // try: gyroidDivisor = 15.0, margin = -uResolution.y
+            // try: gyroidDivisor = 5.0, margin = 20.0
+
+            // input parameters
+            float gyroidDivisor = 5.0; // changes gyroid periodicity
+            float margin = 20.0; // margin of screen, determines sphere size (try negative for massive)
+            float timeConstant = 20.0; // controls animation speed (higher is slower)
+            float gyroidPeriodSwing = 0.1; // how much the period size changes (higher is more drastic change, try to avoid crossing 1.0 or else it gets weird)
+            float glowPower = 0.75; // general glow (higher increases overall sphere glow)
+            float edgeGlowPower = 5.0; // edge glow parameter 1 (higher increases fall-off from edge to center)
+            float edgeGlowStrength = 5.0; // edge glow parameter 2 (higher makes edge glow brighter)
+            float backgroundBrightness = 0.75; // 0.0-1.0 for background brightness
+            
+            // animated
+            float timePhase = sin(uTime/timeConstant);
+            
+            // inits
+            vec3 col;
+
+            // solve depth
+            float minScreenEdge = min(uResolution.y, uResolution.x);
+            float sphereRadiusPix = minScreenEdge/2.0 - margin;
+            vec2 fragCoordCentered = gl_FragCoord.xy - (0.5*uResolution.xy);
+            float depth = sphereDepth(fragCoordCentered/sphereRadiusPix);
+            float inverseDepth = 1.0-depth;
+            
+            // inside sphere
+            if (depth > 0.0) {
+            
+                // position and "normal"
+                vec3 position = vec3(fragCoordCentered/sphereRadiusPix, depth) + timePhase;
+                vec3 normal = abs(position);
+                
+                // solve gyroid
+                float gyroidDivisorAnimated = gyroidDivisor*(1.0-(gyroidPeriodSwing/2.0)+timePhase/(1.0/gyroidPeriodSwing));
+                float gyroidFactor = gyroid(position*2.0*PI*gyroidDivisorAnimated);
+                float inverseGyroidAbs = 1.5-abs(gyroidFactor);
+                
+                // solve glow
+                float edgeGlow = pow(inverseDepth, edgeGlowPower) * edgeGlowStrength;
+                float glow = glowPower + edgeGlow;
+                
+                // color
+                col = vec3(normal*glow*inverseGyroidAbs);
+            } 
+            
+            // background 
+            else {
+                
+                float maxScreenEdge = max(uResolution.y, uResolution.x);
+                float cornerRadius = sqrt(pow(minScreenEdge/2.0, 2.0) + pow(maxScreenEdge/2.0, 2.0))*1.25;
+                float backgroundGradient = sphereDepth(fragCoordCentered/cornerRadius);
+                col = vec3(backgroundGradient*backgroundBrightness);
+            }
+            
+            // output to screen
+            gl_FragColor = vec4(col,1.0);
+        }
+    </script>
+    <!-- <script id="fragmentShader" type="x-shader/x-fragment">
+        precision mediump float;
+        varying vec2 vUv;
+        uniform float uTime;
+        void main() {
+            gl_FragColor = vec4(vUv.x+uTime/10000., vUv.y, 0, 1);  // red
+        }
+    </script> -->
+    <script>
+        const canvas = document.getElementById('webglCanvas')
+        const gl = canvas.getContext('webgl')
+        canvas.style.height = '100%'
+        canvas.style.width = '100%'
+        canvas.width = canvas.clientWidth // resize to client canvas
+        canvas.height = canvas.clientHeight // resize to client canvas
+
+        // Clear Canvas
+        gl.clearColor(0, 0, 0, 0)
+        gl.clear(gl.COLOR_BUFFER_BIT)
+
+        // Set Canvas Size
+        console.log(canvas.width, canvas.height)
+        gl.viewport(0, 0, canvas.width, canvas.height)
+
+        // Set up Attributes
+        const positionBuff = gl.createBuffer()
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuff)
+        let positions = [
+            -1, -1, -1,
+            -1, 1, -1,
+            1, 1, -1,
+            -1, -1, -1,
+            1, 1, -1,
+            1, -1, -1
+        ]
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW)
+        const buffSize = 3
+        const buffType = gl.FLOAT
+
+        // Time Function
+        const startTime = Date.now();
+        const time = () => { return Date.now() - startTime }
+
+        // Load Shaders
+        const vertexShader = document.getElementById('vertexShader').textContent
+        const fragmentShaderRibbons = document.getElementById('fragmentShaderRibbons').textContent
+        const fragmentShaderOrb = document.getElementById('fragmentShaderOrb').textContent
+        
+        // Compile the vertex shader
+        const vShader = gl.createShader( gl['VERTEX_SHADER'] )
+        gl.shaderSource(vShader, vertexShader);
+        gl.compileShader(vShader);
+        console.log(gl.getShaderInfoLog(vShader));
+
+        // Compile the fragment shaders
+        const fShaderRibbons = gl.createShader( gl['FRAGMENT_SHADER'] )
+        gl.shaderSource(fShaderRibbons, fragmentShaderRibbons);
+        gl.compileShader(fShaderRibbons);
+        console.log(gl.getShaderInfoLog(fShaderRibbons));
+
+        const fShaderOrb = gl.createShader( gl['FRAGMENT_SHADER'] )
+        gl.shaderSource(fShaderOrb, fragmentShaderOrb);
+        gl.compileShader(fShaderOrb);
+        console.log(gl.getShaderInfoLog(fShaderOrb));
+
+        // Create Program
+        const setUpProgram = (fShader) => {
+
+            let program = gl.createProgram()
+            gl.attachShader(program, vShader)
+            gl.attachShader(program, fShader)
+            gl.linkProgram(program)
+            gl.useProgram(program)
+            
+            const posAttribLocation = gl.getAttribLocation(program, 'aPosition')
+
+            // Instruct Program how to use attribute data
+            gl.enableVertexAttribArray(posAttribLocation)
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuff)
+            gl.vertexAttribPointer( posAttribLocation, buffSize, buffType, false, 0, 0)
+            
+            // Set up Uniforms
+            let timeUniformLocation = gl.getUniformLocation(program, "uTime")
+            gl.uniform1f(timeUniformLocation, time())
+
+            let resUniformLocation = gl.getUniformLocation(program, "uResolution")
+            gl.uniform2f(resUniformLocation, canvas.width, canvas.height)
+
+            return program
+        }
+
+        let programs = {
+            'ribbons': setUpProgram(fShaderRibbons),
+            'orb': setUpProgram(fShaderOrb)
+        }
+
+        let currentProgram = 'ribbons'
+        gl.useProgram(programs[currentProgram])
+
+        // Draw
+        const count = parseInt(positions.length/3)
+        gl.drawArrays(gl.TRIANGLES, 0, count) //primitive, offset, count
+
+        // Animate!
+        const animate = () => {
+            let timeUniformLocation = gl.getUniformLocation(programs[currentProgram], "uTime")
+            gl.uniform1f(timeUniformLocation, time()/1000)
+            gl.drawArrays(gl.TRIANGLES, 0, count)
+            requestAnimationFrame(animate);
+        }
+
+        const changeShader = (shaderName) => {
+            currentProgram = shaderName
+            gl.useProgram(programs[currentProgram])
+
+            let resUniformLocation = gl.getUniformLocation(programs[currentProgram], "uResolution")
+            gl.uniform2f(resUniformLocation, canvas.width, canvas.height)
+        } 
+
+        window.addEventListener("resize", () => {
+            canvas.width = canvas.clientWidth // resize to client canvas
+            canvas.height = canvas.clientHeight // resize to client canvas
+            let resUniformLocation = gl.getUniformLocation(programs[currentProgram], "uResolution")
+            gl.uniform2f(resUniformLocation, canvas.width, canvas.height)
+        });
+
+        animate()
+    </script>
+</body>
+</html>
